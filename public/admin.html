@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Admin Command Center | The Cournot Cartel</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="/socket.io/socket.io.js"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen font-sans p-4 md:p-6">
+  <div id="admin-root" class="max-w-7xl mx-auto"></div>
+
+  <script>
+    const socket = io();
+    let authenticated = false;
+    let adminData = null;
+    let filterBots = false;
+    let searchQuery = '';
+
+    socket.on('adminAuthSuccess', (snapshot) => {
+      authenticated = true;
+      adminData = snapshot;
+      render();
+    });
+
+    socket.on('adminAuthError', (msg) => {
+      alert(msg);
+    });
+
+    socket.on('adminState', (snapshot) => {
+      adminData = snapshot;
+      render();
+    });
+
+    function loginAdmin() {
+      const key = document.getElementById('adminKeyInput')?.value || '';
+      socket.emit('adminAuth', { key });
+    }
+
+    function adjustTokens(roomCode, playerId, delta) {
+      socket.emit('adminAdjustTokens', { roomCode, playerId, delta });
+    }
+
+    function forceAction(roomCode, action) {
+      if (action === 'DELETE_ROOM' && !confirm(`Delete Room ${roomCode}?`)) return;
+      socket.emit('adminForceAction', { roomCode, action });
+    }
+
+    function exportCSV() {
+      if (!adminData || !adminData.leaderboard.length) return;
+      const rows = [
+        ['Rank', 'Firm Name', 'Type', 'Room Code', 'Phase', 'Quarter', 'Tokens', 'Barrels Sold', 'SPR Stored', 'Insolvencies']
+      ];
+      const list = adminData.leaderboard.filter(p => !filterBots || !p.isBot);
+      list.forEach((p, i) => {
+        rows.push([
+          i + 1,
+          `"${p.name.replace(/"/g, '""')}"`,
+          p.isBot ? 'AI Bot' : 'Human',
+          p.roomCode,
+          p.phase,
+          p.quarter,
+          p.tokens,
+          p.totalBarrelsSold,
+          p.storedBarrels,
+          p.insolvencies
+        ]);
+      });
+      const csvContent = 'data:text/csv;charset=utf-8,' + rows.map(e => e.join(',')).join('\n');
+      const link = document.createElement('a');
+      link.setAttribute('href', encodeURI(csvContent));
+      link.setAttribute('download', `cournot_cartel_standings_${new Date().toISOString().slice(0,10)}.csv`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    }
+
+    function render() {
+      const root = document.getElementById('admin-root');
+
+      if (!authenticated) {
+        root.innerHTML = `
+          <div class="max-w-md mx-auto mt-20 bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-2xl">
+            <div class="text-xs uppercase tracking-widest text-amber-400 font-bold mb-1">Game Theory Society</div>
+            <h1 class="text-2xl font-black text-white mb-2">Tournament Admin Portal</h1>
+            <p class="text-xs text-slate-400 mb-6">Enter the server ADMIN_KEY (default: <code class="text-amber-300">gts-admin-2026</code>) to monitor all active lobbies and global player points.</p>
+            <input id="adminKeyInput" type="password" placeholder="Enter Admin Passkey" onkeydown="if(event.key==='Enter') loginAdmin()" class="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2.5 mb-4 text-white font-mono" />
+            <button onclick="loginAdmin()" class="w-full bg-amber-500 hover:bg-amber-400 text-slate-950 font-black py-2.5 rounded-lg">Unlock Live Telemetry</button>
+          </div>
+        `;
+        return;
+      }
+
+      const filteredLeaderboard = adminData.leaderboard.filter(p => {
+        if (filterBots && p.isBot) return false;
+        if (searchQuery && !p.name.toLowerCase().includes(searchQuery.toLowerCase()) && !p.roomCode.toLowerCase().includes(searchQuery.toLowerCase())) return false;
+        return true;
+      });
+
+      root.innerHTML = `
+        <!-- Top Stats Header -->
+        <div class="flex flex-wrap items-center justify-between bg-slate-900 border border-slate-800 rounded-2xl p-5 mb-6 gap-4">
+          <div>
+            <div class="flex items-center gap-2">
+              <span class="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></span>
+              <span class="text-xs uppercase tracking-widest text-emerald-400 font-bold">Live Telemetry Active</span>
+            </div>
+            <h1 class="text-2xl font-black text-white mt-0.5">THE COURNOT CARTEL — ADMIN COMMAND</h1>
+          </div>
+
+          <div class="flex flex-wrap items-center gap-6">
+            <div class="bg-slate-950 border border-slate-800 px-4 py-2 rounded-xl">
+              <span class="text-xs text-slate-400 block">Active Rooms</span>
+              <span class="text-xl font-black text-amber-400">${adminData.totalRooms}</span>
+            </div>
+            <div class="bg-slate-950 border border-slate-800 px-4 py-2 rounded-xl">
+              <span class="text-xs text-slate-400 block">Total Firms</span>
+              <span class="text-xl font-black text-emerald-400">${adminData.totalPlayers}</span>
+            </div>
+            <button onclick="exportCSV()" class="bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-4 py-2.5 rounded-xl text-sm">
+              ⬇ Export Standings CSV
+            </button>
+          </div>
+        </div>
+
+        <!-- Global Leaderboard Across All Rooms -->
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl p-5 mb-8">
+          <div class="flex flex-wrap items-center justify-between gap-4 mb-4">
+            <div>
+              <h2 class="text-lg font-black text-amber-400">Global Points Leaderboard (All Rooms)</h2>
+              <p class="text-xs text-slate-400">Sorted by Net Capital Tokens, then by lowest cumulative barrels dumped.</p>
+            </div>
+            <div class="flex flex-wrap items-center gap-3">
+              <input
+                type="text"
+                placeholder="Search player or room..."
+                value="${searchQuery}"
+                oninput="searchQuery=this.value; render();"
+                class="bg-slate-950 border border-slate-700 rounded-lg px-3 py-1.5 text-sm text-white"
+              />
+              <label class="flex items-center gap-2 text-xs text-slate-300 cursor-pointer bg-slate-950 border border-slate-800 px-3 py-1.5 rounded-lg">
+                <input type="checkbox" ${filterBots ? 'checked' : ''} onchange="filterBots=this.checked; render();" />
+                Hide AI Bots
+              </label>
+            </div>
+          </div>
+
+          <div class="overflow-x-auto">
+            <table class="w-full text-left text-sm">
+              <thead>
+                <tr class="border-b border-slate-800 text-xs uppercase text-slate-400">
+                  <th class="py-2.5 px-2">Rank</th>
+                  <th class="py-2.5 px-2">Firm / Player</th>
+                  <th class="py-2.5 px-2">Room</th>
+                  <th class="py-2.5 px-2">Status</th>
+                  <th class="py-2.5 px-2">Quarter</th>
+                  <th class="py-2.5 px-2">Capital Tokens</th>
+                  <th class="py-2.5 px-2">Barrels Sold</th>
+                  <th class="py-2.5 px-2">SPR Silo</th>
+                  <th class="py-2.5 px-2">Admin Adjust</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${filteredLeaderboard.length === 0 ? `
+                  <tr><td colspan="9" class="text-center py-8 text-slate-500">No active players match the filter.</td></tr>
+                ` : filteredLeaderboard.map((p, idx) => `
+                  <tr class="border-b border-slate-800/60 hover:bg-slate-950/60">
+                    <td class="py-2.5 px-2 font-mono font-bold text-slate-400">#${idx + 1}</td>
+                    <td class="py-2.5 px-2 font-bold text-white">
+                      ${p.name}
+                      ${p.isBot ? '<span class="ml-1 text-[10px] bg-slate-800 text-slate-400 px-1.5 py-0.5 rounded">BOT</span>' : '<span class="ml-1 text-[10px] bg-amber-500/20 text-amber-300 px-1.5 py-0.5 rounded">HUMAN</span>'}
+                    </td>
+                    <td class="py-2.5 px-2 font-mono text-amber-400 font-bold">${p.roomCode}</td>
+                    <td class="py-2.5 px-2">
+                      <span class="text-xs px-2 py-0.5 rounded-full ${
+                        p.eliminated ? 'bg-rose-500/20 text-rose-300' :
+                        p.phase === 'GAME_OVER' ? 'bg-amber-500/20 text-amber-300' :
+                        'bg-emerald-500/20 text-emerald-300'
+                      }">${p.eliminated ? 'LIQUIDATED' : p.phase}</span>
+                    </td>
+                    <td class="py-2.5 px-2 font-mono text-xs">${p.quarter}</td>
+                    <td class="py-2.5 px-2 text-lg font-black text-amber-400">${p.tokens}</td>
+                    <td class="py-2.5 px-2 text-slate-300">${p.totalBarrelsSold}B</td>
+                    <td class="py-2.5 px-2 text-slate-400">${p.storedBarrels}B</td>
+                    <td class="py-2.5 px-2">
+                      <div class="flex items-center gap-1">
+                        <button onclick="adjustTokens('${p.roomCode}', '${p.playerId}', 5)" class="bg-slate-800 hover:bg-emerald-600 text-xs px-2 py-1 rounded font-bold">+5</button>
+                        <button onclick="adjustTokens('${p.roomCode}', '${p.playerId}', -5)" class="bg-slate-800 hover:bg-rose-600 text-xs px-2 py-1 rounded font-bold">-5</button>
+                      </div>
+                    </td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Live Room Inspector Cards -->
+        <h2 class="text-lg font-black text-white mb-4">Live Room Inspector (God-Mode View)</h2>
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          ${adminData.rooms.length === 0 ? `
+            <div class="col-span-2 bg-slate-900 border border-slate-800 rounded-2xl p-8 text-center text-slate-500">
+              No active rooms created yet.
+            </div>
+          ` : adminData.rooms.map(room => `
+            <div class="bg-slate-900 border border-slate-800 rounded-2xl p-5 flex flex-col justify-between">
+              <div>
+                <div class="flex flex-wrap justify-between items-start border-b border-slate-800 pb-3 mb-4 gap-2">
+                  <div>
+                    <div class="flex items-center gap-2">
+                      <span class="font-mono text-xl font-black text-amber-400">ROOM ${room.code}</span>
+                      <span class="text-xs bg-slate-800 text-slate-300 px-2 py-0.5 rounded">${room.phase}</span>
+                      <span class="text-xs text-slate-400">Q${room.quarter}/${room.maxQuarters}</span>
+                    </div>
+                    <div class="text-xs text-slate-400 mt-1">
+                      Agreed Summit Quota: <b class="text-white">${room.quota}B</b> | Created: ${room.createdAt}
+                    </div>
+                  </div>
+                  <div class="flex gap-1.5">
+                    ${room.phase === 'PLAYING' ? `
+                      <button onclick="forceAction('${room.code}', 'FORCE_RESOLVE')" class="bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold px-2.5 py-1.5 rounded-lg">
+                        ⚡ Force Resolve
+                      </button>
+                    ` : ''}
+                    ${room.phase === 'RESULTS' ? `
+                      <button onclick="forceAction('${room.code}', 'FORCE_NEXT')" class="bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-bold px-2.5 py-1.5 rounded-lg">
+                        ⏭ Next Quarter
+                      </button>
+                    ` : ''}
+                    <button onclick="forceAction('${room.code}', 'DELETE_ROOM')" class="bg-rose-950 hover:bg-rose-800 text-rose-300 text-xs font-bold px-2.5 py-1.5 rounded-lg border border-rose-800">
+                      ✕ Close
+                    </button>
+                  </div>
+                </div>
+
+                ${room.currentDemand ? `
+                  <div class="bg-slate-950 border border-slate-800 rounded-xl p-3 mb-4 text-xs">
+                    <span class="text-indigo-400 font-bold uppercase">Active Hidden Demand Card:</span>
+                    <b class="text-white ml-1">${room.currentDemand.name}</b> —
+                    <span class="font-mono text-amber-300">P = max(${room.currentDemand.Pmin}, ${room.currentDemand.A} - ${room.currentDemand.k} × Q)</span>
+                  </div>
+                ` : ''}
+
+                <div class="space-y-2 mb-4">
+                  ${room.players.map(p => `
+                    <div class="bg-slate-950 border border-slate-800/80 rounded-xl p-2.5 flex flex-wrap items-center justify-between text-xs gap-2">
+                      <div>
+                        <span class="font-bold text-white">${p.name}</span>
+                        <span class="text-amber-400 font-bold ml-2">${p.tokens} tokens</span>
+                        <span class="text-slate-400 ml-2">(Sold: ${p.totalBarrelsSold}B | Silo: ${p.storedBarrels}B)</span>
+                      </div>
+                      <div class="flex items-center gap-2">
+                        <span class="text-slate-400">Hand: <b class="text-slate-200">[${p.outputHand.join(', ')}]</b></span>
+                        ${p.locked ? `<span class="bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded font-bold">Locked: ${p.lockedPreview}</span>` : `<span class="text-slate-500">Thinking...</span>`}
+                      </div>
+                    </div>
+                  `).join('')}
+                </div>
+              </div>
+
+              ${room.lastRoundSummary ? `
+                <div class="border-t border-slate-800 pt-3 text-xs text-slate-400 flex justify-between">
+                  <span>Last Clear (Q${room.lastRoundSummary.quarter}): <b>Q = ${room.lastRoundSummary.Q_total}B</b></span>
+                  <span>Market Price: <b class="text-emerald-400">P = ${room.lastRoundSummary.P} tokens/B</b></span>
+                </div>
+              ` : ''}
+            </div>
+          `).join('')}
+        </div>
+      `;
+    }
+
+    render();
+  </script>
+</body>
+</html>
