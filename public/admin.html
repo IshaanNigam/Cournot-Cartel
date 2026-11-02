@@ -5,45 +5,74 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Admin Command Center | The Cournot Cartel</title>
   <script src="https://cdn.tailwindcss.com"></script>
-  <script src="/socket.io/socket.io.js"></script>
 </head>
 <body class="bg-slate-950 text-slate-100 min-h-screen font-sans p-4 md:p-6">
   <div id="admin-root" class="max-w-7xl mx-auto"></div>
 
   <script>
-    const socket = io();
+    let adminKey = sessionStorage.getItem('cartel_admin_key') || '';
     let authenticated = false;
     let adminData = null;
     let filterBots = false;
     let searchQuery = '';
 
-    socket.on('adminAuthSuccess', (snapshot) => {
-      authenticated = true;
-      adminData = snapshot;
-      render();
-    });
+    async function pollAdmin() {
+      if (!adminKey) return;
+      try {
+        const res = await fetch('/api/game', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'ADMIN_POLL', key: adminKey })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          authenticated = false;
+          adminKey = '';
+          sessionStorage.removeItem('cartel_admin_key');
+          alert(data.error || 'Invalid Admin Key');
+          render();
+          return;
+        }
+        authenticated = true;
+        adminData = data;
+        render();
+      } catch (e) {}
+    }
 
-    socket.on('adminAuthError', (msg) => {
-      alert(msg);
-    });
-
-    socket.on('adminState', (snapshot) => {
-      adminData = snapshot;
-      render();
-    });
+    setInterval(() => {
+      if (authenticated && adminKey) pollAdmin();
+    }, 1500);
 
     function loginAdmin() {
-      const key = document.getElementById('adminKeyInput')?.value || '';
-      socket.emit('adminAuth', { key });
+      const val = document.getElementById('adminKeyInput')?.value || '';
+      adminKey = val.trim();
+      sessionStorage.setItem('cartel_admin_key', adminKey);
+      pollAdmin();
     }
 
-    function adjustTokens(roomCode, playerId, delta) {
-      socket.emit('adminAdjustTokens', { roomCode, playerId, delta });
+    async function adjustTokens(roomCode, targetPlayerId, delta) {
+      const res = await fetch('/api/game', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'ADMIN_ADJUST', key: adminKey, code: roomCode, targetPlayerId, delta })
+      });
+      if (res.ok) {
+        adminData = await res.json();
+        render();
+      }
     }
 
-    function forceAction(roomCode, action) {
-      if (action === 'DELETE_ROOM' && !confirm(`Delete Room ${roomCode}?`)) return;
-      socket.emit('adminForceAction', { roomCode, action });
+    async function forceAction(roomCode, subAction) {
+      if (subAction === 'DELETE_ROOM' && !confirm(`Delete Room ${roomCode}?`)) return;
+      const res = await fetch('/api/game', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'ADMIN_FORCE', key: adminKey, code: roomCode, subAction })
+      });
+      if (res.ok) {
+        adminData = await res.json();
+        render();
+      }
     }
 
     function exportCSV() {
@@ -78,7 +107,7 @@
     function render() {
       const root = document.getElementById('admin-root');
 
-      if (!authenticated) {
+      if (!authenticated || !adminData) {
         root.innerHTML = `
           <div class="max-w-md mx-auto mt-20 bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-2xl">
             <div class="text-xs uppercase tracking-widest text-amber-400 font-bold mb-1">Game Theory Society</div>
@@ -98,12 +127,11 @@
       });
 
       root.innerHTML = `
-        <!-- Top Stats Header -->
         <div class="flex flex-wrap items-center justify-between bg-slate-900 border border-slate-800 rounded-2xl p-5 mb-6 gap-4">
           <div>
             <div class="flex items-center gap-2">
               <span class="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></span>
-              <span class="text-xs uppercase tracking-widest text-emerald-400 font-bold">Live Telemetry Active</span>
+              <span class="text-xs uppercase tracking-widest text-emerald-400 font-bold">Vercel Serverless Telemetry Active</span>
             </div>
             <h1 class="text-2xl font-black text-white mt-0.5">THE COURNOT CARTEL — ADMIN COMMAND</h1>
           </div>
@@ -123,7 +151,6 @@
           </div>
         </div>
 
-        <!-- Global Leaderboard Across All Rooms -->
         <div class="bg-slate-900 border border-slate-800 rounded-2xl p-5 mb-8">
           <div class="flex flex-wrap items-center justify-between gap-4 mb-4">
             <div>
@@ -195,7 +222,6 @@
           </div>
         </div>
 
-        <!-- Live Room Inspector Cards -->
         <h2 class="text-lg font-black text-white mb-4">Live Room Inspector (God-Mode View)</h2>
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
           ${adminData.rooms.length === 0 ? `
@@ -213,7 +239,7 @@
                       <span class="text-xs text-slate-400">Q${room.quarter}/${room.maxQuarters}</span>
                     </div>
                     <div class="text-xs text-slate-400 mt-1">
-                      Agreed Summit Quota: <b class="text-white">${room.quota}B</b> | Created: ${room.createdAt}
+                      Quota: <b class="text-white">${room.quota}B</b> | Tech Mode: <b class="text-emerald-300">${room.techReusable ? '2 Constant Reusable' : '2 Single-Use'}</b>
                     </div>
                   </div>
                   <div class="flex gap-1.5">
@@ -243,34 +269,33 @@
 
                 <div class="space-y-2 mb-4">
                   ${room.players.map(p => `
-                    <div class="bg-slate-950 border border-slate-800/80 rounded-xl p-2.5 flex flex-wrap items-center justify-between text-xs gap-2">
-                      <div>
-                        <span class="font-bold text-white">${p.name}</span>
-                        <span class="text-amber-400 font-bold ml-2">${p.tokens} tokens</span>
-                        <span class="text-slate-400 ml-2">(Sold: ${p.totalBarrelsSold}B | Silo: ${p.storedBarrels}B)</span>
+                    <div class="bg-slate-950 border border-slate-800/80 rounded-xl p-2.5 text-xs space-y-1">
+                      <div class="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <span class="font-bold text-white">${p.name}</span>
+                          <span class="text-amber-400 font-bold ml-2">${p.tokens} tokens</span>
+                          <span class="text-slate-400 ml-2">(Sold: ${p.totalBarrelsSold}B | Silo: ${p.storedBarrels}B)</span>
+                        </div>
+                        <div class="flex items-center gap-2">
+                          <span class="text-slate-400">Hand: <b class="text-slate-200">[${p.outputHand.join(', ')}]</b></span>
+                          ${p.locked ? `<span class="bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded font-bold">Locked: ${p.lockedPreview}</span>` : `<span class="text-slate-500">Thinking...</span>`}
+                        </div>
                       </div>
-                      <div class="flex items-center gap-2">
-                        <span class="text-slate-400">Hand: <b class="text-slate-200">[${p.outputHand.join(', ')}]</b></span>
-                        ${p.locked ? `<span class="bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded font-bold">Locked: ${p.lockedPreview}</span>` : `<span class="text-slate-500">Thinking...</span>`}
+                      <div class="text-[11px] text-slate-400">
+                        2 Assigned Tech Cards: <span class="text-indigo-300">${p.techHand.join(' • ') || 'None'}</span>
                       </div>
                     </div>
                   `).join('')}
                 </div>
               </div>
-
-              ${room.lastRoundSummary ? `
-                <div class="border-t border-slate-800 pt-3 text-xs text-slate-400 flex justify-between">
-                  <span>Last Clear (Q${room.lastRoundSummary.quarter}): <b>Q = ${room.lastRoundSummary.Q_total}B</b></span>
-                  <span>Market Price: <b class="text-emerald-400">P = ${room.lastRoundSummary.P} tokens/B</b></span>
-                </div>
-              ` : ''}
             </div>
           `).join('')}
         </div>
       `;
     }
 
-    render();
+    if (adminKey) pollAdmin();
+    else render();
   </script>
 </body>
 </html>

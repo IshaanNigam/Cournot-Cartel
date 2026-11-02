@@ -5,58 +5,105 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>The Cournot Cartel | Game Theory Society</title>
   <script src="https://cdn.tailwindcss.com"></script>
-  <script src="/socket.io/socket.io.js"></script>
 </head>
 <body class="bg-slate-950 text-slate-100 min-h-screen font-sans p-4 md:p-6">
   <div id="app" class="max-w-5xl mx-auto"></div>
 
   <script>
-    const socket = io();
+    // Persistent browser session ID for player identity across serverless polls
+    let playerId = sessionStorage.getItem('cartel_pid');
+    if (!playerId) {
+      playerId = 'p_' + Math.random().toString(36).substring(2, 10);
+      sessionStorage.setItem('cartel_pid', playerId);
+    }
+
     let state = null;
+    let roomBackup = null;
+    let activeRoomCode = '';
     let selectedCardIdx = 0;
     let selectedTechUid = '';
     let selectedTargetId = '';
     let releaseStoredCount = 0;
-    let isProjectorMode = false;
+    let lastRenderedVersion = -1;
 
-    socket.on('roomState', (newState) => {
-      state = newState;
-      render();
-    });
-
-    socket.on('errorMsg', (msg) => alert(msg));
-
-    function createRoom(projector) {
-      isProjectorMode = projector;
-      const name = document.getElementById('playerName')?.value || 'Syndicate Alpha';
-      socket.emit('createRoom', { playerName: name, isProjector: projector });
+    async function apiCall(payload) {
+      try {
+        const res = await fetch('/api/game', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ...payload,
+            playerId,
+            code: payload.code || activeRoomCode,
+            backup: roomBackup
+          })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          if (payload.action !== 'POLL') alert(data.error || 'Request failed');
+          return null;
+        }
+        if (data.room) {
+          const phaseChanged = !state || state.phase !== data.room.phase || state.quarter !== data.room.quarter;
+          state = data.room;
+          roomBackup = data.room.backup;
+          activeRoomCode = data.room.code;
+          if (phaseChanged) {
+            selectedCardIdx = 0;
+            selectedTechUid = '';
+            selectedTargetId = '';
+            releaseStoredCount = 0;
+          }
+          render();
+        }
+        return data;
+      } catch (e) {
+        return null;
+      }
     }
 
-    function joinRoom(projector) {
-      isProjectorMode = projector;
+    // Poll serverless state every 1.2 seconds when inside a room
+    setInterval(() => {
+      if (activeRoomCode) {
+        apiCall({ action: 'POLL' });
+      }
+    }, 1200);
+
+    function createRoom(isProjector) {
+      const name = document.getElementById('playerName')?.value || 'Syndicate Alpha';
+      apiCall({ action: 'CREATE_ROOM', playerName: name, isProjector });
+    }
+
+    function joinRoom(isProjector) {
       const name = document.getElementById('playerName')?.value || 'Firm Beta';
       const code = document.getElementById('roomCodeInput')?.value || '';
-      socket.emit('joinRoom', { code, playerName: name, isProjector: projector });
+      if (!code.trim()) return alert('Enter a 4-letter Room Code');
+      apiCall({ action: 'JOIN_ROOM', code, playerName: name, isProjector });
     }
 
     function addBot(persona) {
-      socket.emit('addBot', { persona });
+      apiCall({ action: 'ADD_BOT', persona });
+    }
+
+    function toggleTechMode(val) {
+      apiCall({ action: 'TOGGLE_TECH_MODE', techReusable: val === 'REUSABLE' });
     }
 
     function startGame() {
-      socket.emit('startGame');
+      apiCall({ action: 'START_GAME' });
     }
 
     function updateQuota(val) {
-      socket.emit('setQuota', { quota: val });
+      apiCall({ action: 'SET_QUOTA', quota: val });
     }
 
     function triggerRecon(uid) {
-      socket.emit('useRecon', { techUid: uid });
+      apiCall({ action: 'USE_RECON', techUid: uid });
     }
 
     function submitMove() {
-      socket.emit('lockMove', {
+      apiCall({
+        action: 'LOCK_MOVE',
         cardIndex: selectedCardIdx,
         releaseStored: releaseStoredCount,
         techUid: selectedTechUid,
@@ -65,11 +112,7 @@
     }
 
     function nextQuarter() {
-      selectedCardIdx = 0;
-      selectedTechUid = '';
-      selectedTargetId = '';
-      releaseStoredCount = 0;
-      socket.emit('nextQuarter');
+      apiCall({ action: 'NEXT_QUARTER' });
     }
 
     const COSTS = { 1: 0, 2: 2, 3: 5, 4: 9, 5: 14 };
@@ -107,17 +150,16 @@
 
       const me = state.players.find(p => p.outputHand !== undefined);
 
-      // Header Bar
       let html = `
         <div class="flex flex-wrap items-center justify-between bg-slate-900 border border-slate-800 rounded-xl p-4 mb-6 gap-4">
           <div>
             <span class="text-xs uppercase tracking-widest text-slate-400">Room Code</span>
             <div class="text-2xl font-mono font-black text-amber-400">${state.code}</div>
           </div>
-          <div class="flex items-center gap-6">
+          <div class="flex flex-wrap items-center gap-5">
             <div>
               <span class="text-xs text-slate-400 block">Fiscal Quarter</span>
-              <span class="text-lg font-bold">${state.quarter} /${state.maxQuarters}</span>
+              <span class="text-lg font-bold">${state.quarter} / ${state.maxQuarters}</span>
             </div>
             <div>
               <span class="text-xs text-slate-400 block">Summit Quota Pact</span>
@@ -132,7 +174,7 @@
         </div>
       `;
 
-      // Standings Leaderboard
+      // Leaderboard
       html += `
         <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-6">
           ${state.players.map(p => `
@@ -144,7 +186,7 @@
                 </span>
               </div>
               <div class="text-xl font-black text-amber-400">${p.tokens} <span class="text-xs font-normal text-slate-400">tokens</span></div>
-              <div class="text-xs text-slate-400 mt-1">SPR Silo: <b>${p.storedBarrels}B</b> | Sold: <b>${p.totalBarrelsSold}B</b></div>
+              <div class="text-xs text-slate-400 mt-1">SPR: <b>${p.storedBarrels}B</b> | Tech Left: <b>${p.techRemaining}/2</b></div>
             </div>
           `).join('')}
         </div>
@@ -154,7 +196,16 @@
         html += `
           <div class="bg-slate-900 border border-slate-800 rounded-xl p-6 text-center">
             <h2 class="text-lg font-bold mb-2">Waiting for Conglomerates (${state.players.length}/6)</h2>
-            <p class="text-sm text-slate-400 mb-6">Share Room Code <b class="text-amber-400 font-mono">${state.code}</b> with players or add AI Bots below.</p>
+            <p class="text-sm text-slate-400 mb-4">Share Room Code <b class="text-amber-400 font-mono">${state.code}</b> with players or add AI Bots below.</p>
+            
+            <div class="max-w-md mx-auto bg-slate-950 border border-slate-800 rounded-xl p-3 mb-6 text-left">
+              <label class="text-xs text-amber-400 font-bold uppercase block mb-1">2 Initial Tech Cards Rule (All 5 Rounds):</label>
+              <select onchange="toggleTechMode(this.value)" class="w-full bg-slate-900 border border-slate-700 rounded px-2.5 py-1.5 text-xs text-white">
+                <option value="SINGLE_USE" ${!state.techReusable ? 'selected' : ''}>2 Tech Cards Dealt at Start — Consumable (1 Use Each Across 5 Rounds)</option>
+                <option value="REUSABLE" ${state.techReusable ? 'selected' : ''}>2 Tech Cards Dealt at Start — Constant Reusable Passives Every Round</option>
+              </select>
+            </div>
+
             <div class="flex flex-wrap justify-center gap-2 mb-6">
               <button onclick="addBot('COOPERATOR')" class="bg-slate-800 hover:bg-slate-700 px-3 py-2 rounded-lg text-xs">+ Add Quota Cooperator Bot</button>
               <button onclick="addBot('BALANCED')" class="bg-slate-800 hover:bg-slate-700 px-3 py-2 rounded-lg text-xs">+ Add Nash Optimizer Bot</button>
@@ -170,7 +221,7 @@
           html += `
             <div class="bg-indigo-950/70 border border-indigo-500 rounded-xl p-4 mb-6">
               <div class="text-xs uppercase tracking-wider text-indigo-300 font-bold">🛰️ Classified Satellite Recon Intercept</div>
-              <div class="text-lg font-bold text-white">${state.reconDemand.name}: P = max(${state.reconDemand.Pmin}, ${state.reconDemand.A} -${state.reconDemand.k} × Q)</div>
+              <div class="text-lg font-bold text-white">${state.reconDemand.name}: P = max(${state.reconDemand.Pmin}, ${state.reconDemand.A} - ${state.reconDemand.k} × Q)</div>
               <div class="text-xs text-indigo-200">${state.reconDemand.desc}</div>
             </div>
           `;
@@ -197,21 +248,34 @@
                 </div>
               ` : ''}
 
-              <h3 class="font-bold text-amber-400 mb-3">2. Sub-Rosa Tech Card (Optional)</h3>
-              <div class="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
-                ${me.techHand.map(t => `
-                  <div class="border rounded-xl p-3 ${selectedTechUid === t.uid ? 'border-emerald-400 bg-emerald-500/10' : 'border-slate-800 bg-slate-950'}">
-                    <div class="font-bold text-sm text-emerald-300">${t.name}</div>
-                    <p class="text-xs text-slate-400 my-2">${t.desc}</p>
-                    ${t.id === 'RECON' ? `
-                      <button onclick="triggerRecon('${t.uid}')" class="w-full bg-indigo-600 hover:bg-indigo-500 text-xs font-bold py-1.5 rounded">Activate Recon Now</button>
-                    ` : `
-                      <button onclick="selectedTechUid = (selectedTechUid === '${t.uid}' ? '' : '${t.uid}'); render();" class="w-full bg-slate-800 hover:bg-slate-700 text-xs font-bold py-1.5 rounded">
-                        ${selectedTechUid === t.uid ? 'Equipped' : 'Equip Card'}
-                      </button>
-                    `}
-                  </div>
-                `).join('')}
+              <div class="flex items-center justify-between mb-3">
+                <h3 class="font-bold text-amber-400">2. Your 2 Constant Sub-Rosa Tech Cards (Dealt for Entire Match)</h3>
+                <span class="text-xs text-slate-400">${state.techReusable ? 'Reusable Every Quarter' : '1 Use Per Card Across 5 Quarters'}</span>
+              </div>
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
+                ${me.techHand.map(t => {
+                  const isDepleted = t.used && !state.techReusable;
+                  return `
+                    <div class="border rounded-xl p-3.5 ${isDepleted ? 'border-slate-800/60 bg-slate-950/40 opacity-50' : (selectedTechUid === t.uid ? 'border-emerald-400 bg-emerald-500/10' : 'border-slate-800 bg-slate-950')}">
+                      <div class="flex justify-between items-center">
+                        <span class="font-bold text-sm ${isDepleted ? 'text-slate-500 line-through' : 'text-emerald-300'}">${t.name}</span>
+                        <span class="text-[10px] px-2 py-0.5 rounded ${isDepleted ? 'bg-rose-500/20 text-rose-300' : 'bg-emerald-500/20 text-emerald-300'}">
+                          ${isDepleted ? `USED IN Q${t.usedInQuarter}` : 'READY'}
+                        </span>
+                      </div>
+                      <p class="text-xs text-slate-400 my-2">${t.desc}</p>
+                      ${!isDepleted ? (
+                        t.id === 'RECON' ? `
+                          <button onclick="triggerRecon('${t.uid}')" class="w-full bg-indigo-600 hover:bg-indigo-500 text-xs font-bold py-1.5 rounded">Activate Recon Now</button>
+                        ` : `
+                          <button onclick="selectedTechUid = (selectedTechUid === '${t.uid}' ? '' : '${t.uid}'); render();" class="w-full bg-slate-800 hover:bg-slate-700 text-xs font-bold py-1.5 rounded">
+                            ${selectedTechUid === t.uid ? '✓ Equipped for This Quarter' : 'Equip Card'}
+                          </button>
+                        `
+                      ) : ''}
+                    </div>
+                  `;
+                }).join('')}
               </div>
 
               ${selectedTechUid ? `
@@ -245,7 +309,7 @@
               <div>
                 <span class="text-xs uppercase text-amber-400 font-bold">Macro Demand Shock Revealed</span>
                 <h2 class="text-2xl font-black">${s.demand.name}</h2>
-                <p class="text-xs text-slate-400">${s.demand.desc} \vert{} Formula: P = max(${s.demand.Pmin}, ${s.demand.A} -${s.demand.k} × Q)</p>
+                <p class="text-xs text-slate-400">${s.demand.desc} | Formula: P = max(${s.demand.Pmin}, ${s.demand.A} - ${s.demand.k} × Q)</p>
               </div>
               <div class="flex gap-6 text-right">
                 <div>
@@ -281,11 +345,13 @@
                 <tbody>
                   ${s.results.map(r => `
                     <tr class="border-b border-slate-800/50">
-                      <td class="py-2 font-bold">${r.name} ${r.techCard ? `<span class="text-xs bg-indigo-500/20 text-indigo-300 px-1.5 py-0.5 rounded ml-1">${r.techCard.name}</span>` : ''}</td> <td>${r.baseBarrels}B ${r.releasedBarrels ? `+${r.releasedBarrels}B(SPR)` : ''}</td>
+                      <td class="py-2 font-bold">${r.name} ${r.techCard ? `<span class="text-xs bg-indigo-500/20 text-indigo-300 px-1.5 py-0.5 rounded ml-1">${r.techCard.name}</span>` : ''}</td>
+                      <td>${r.baseBarrels}B ${r.releasedBarrels ? `+${r.releasedBarrels}B(SPR)` : ''}</td>
                       <td>${r.effectiveBarrels}B ${r.seizedBarrels ? `<span class="text-rose-400 text-xs">(-${r.seizedBarrels}B seized)</span>` : ''}</td>
                       <td>+${r.revenue}</td>
                       <td class="text-rose-400">-${r.baseCost}</td>
-                      <td>${r.bounties - r.fines >= 0 ? `+${r.bounties - r.fines}` : (r.bounties - r.fines)}</td> <td class="font-black ${r.netProfit >= 0 ? 'text-emerald-400' : 'text-rose-400'}">${r.netProfit >= 0 ? `+${r.netProfit}` : r.netProfit}</td>
+                      <td>${r.bounties - r.fines >= 0 ? `+${r.bounties - r.fines}` : (r.bounties - r.fines)}</td>
+                      <td class="font-black ${r.netProfit >= 0 ? 'text-emerald-400' : 'text-rose-400'}">${r.netProfit >= 0 ? `+${r.netProfit}` : r.netProfit}</td>
                     </tr>
                   `).join('')}
                 </tbody>

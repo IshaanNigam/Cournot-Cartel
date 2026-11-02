@@ -1,13 +1,12 @@
 {
-  "name": "cournot-cartel-server",
-  "version": "1.0.0",
-  "description": "Multiplayer Game Theory Server for The Cournot Cartel",
+  "name": "cournot-cartel-vercel",
+  "version": "2.0.0",
+  "description": "Serverless Game Theory Engine for The Cournot Cartel (Vercel & Localhost)",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
-  "dependencies": {
-    "express": "^4.19.2",
-    "socket.io": "^4.7.5"
+  "engines": {
+    "node": ">=18.x"
   }
 }
