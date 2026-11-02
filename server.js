@@ -2,6 +2,7 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const path = require('path');
+const fs = require('fs');
 
 const app = express();
 const server = http.createServer(app);
@@ -9,12 +10,352 @@ const io = new Server(server);
 
 const ADMIN_KEY = process.env.ADMIN_KEY || 'gts-admin-2026';
 
-app.use(express.static(path.join(__dirname, 'public')));
+// Built-in Main Game UI (Guaranteed to load at "/" even if public/index.html is missing)
+const MAIN_GAME_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>The Cournot Cartel | Game Theory Society</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="/socket.io/socket.io.js"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen font-sans p-4 md:p-6">
+  <div id="app" class="max-w-5xl mx-auto"></div>
 
-// Direct route for the Admin Dashboard
-app.get('/admin', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'admin.html'));
+  <script>
+    const socket = io();
+    let state = null;
+    let selectedCardIdx = 0;
+    let selectedTechUid = '';
+    let selectedTargetId = '';
+    let releaseStoredCount = 0;
+    let isProjectorMode = false;
+
+    socket.on('roomState', (newState) => {
+      state = newState;
+      render();
+    });
+
+    socket.on('errorMsg', (msg) => alert(msg));
+
+    function createRoom(projector) {
+      isProjectorMode = projector;
+      const name = document.getElementById('playerName')?.value || 'Syndicate Alpha';
+      socket.emit('createRoom', { playerName: name, isProjector: projector });
+    }
+
+    function joinRoom(projector) {
+      isProjectorMode = projector;
+      const name = document.getElementById('playerName')?.value || 'Firm Beta';
+      const code = document.getElementById('roomCodeInput')?.value || '';
+      socket.emit('joinRoom', { code, playerName: name, isProjector: projector });
+    }
+
+    function addBot(persona) {
+      socket.emit('addBot', { persona });
+    }
+
+    function startGame() {
+      socket.emit('startGame');
+    }
+
+    function updateQuota(val) {
+      socket.emit('setQuota', { quota: val });
+    }
+
+    function triggerRecon(uid) {
+      socket.emit('useRecon', { techUid: uid });
+    }
+
+    function submitMove() {
+      socket.emit('lockMove', {
+        cardIndex: selectedCardIdx,
+        releaseStored: releaseStoredCount,
+        techUid: selectedTechUid,
+        targetId: selectedTargetId
+      });
+    }
+
+    function nextQuarter() {
+      selectedCardIdx = 0;
+      selectedTechUid = '';
+      selectedTargetId = '';
+      releaseStoredCount = 0;
+      socket.emit('nextQuarter');
+    }
+
+    const COSTS = { 1: 0, 2: 2, 3: 5, 4: 9, 5: 14 };
+
+    function render() {
+      const root = document.getElementById('app');
+      if (!state) {
+        root.innerHTML = \`
+          <div class="max-w-md mx-auto mt-12 bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl relative">
+            <a href="/admin" target="_blank" class="absolute top-4 right-4 text-[11px] bg-slate-800 hover:bg-slate-700 text-slate-300 px-2.5 py-1 rounded-md border border-slate-700">
+              Admin Portal ↗
+            </a>
+            <h1 class="text-2xl font-bold text-amber-400 mb-1">THE COURNOT CARTEL</h1>
+            <p class="text-xs text-slate-400 mb-6">Oligopoly, Asymmetric Costs & Collusion Engine</p>
+            
+            <label class="block text-xs uppercase tracking-wider text-slate-400 mb-1">Your Firm Name</label>
+            <input id="playerName" type="text" placeholder="e.g. PetroVanguard" class="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 mb-4 text-white" />
+
+            <div class="grid grid-cols-2 gap-2 mb-6">
+              <button onclick="createRoom(false)" class="bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold py-2.5 rounded-lg text-sm">Host as Player</button>
+              <button onclick="createRoom(true)" class="bg-slate-800 hover:bg-slate-700 text-amber-300 font-semibold py-2.5 rounded-lg text-sm border border-amber-500/30">Host Projector View</button>
+            </div>
+
+            <div class="border-t border-slate-800 pt-4">
+              <label class="block text-xs uppercase tracking-wider text-slate-400 mb-1">Join Existing Room Code</label>
+              <div class="flex gap-2">
+                <input id="roomCodeInput" type="text" placeholder="ABCD" class="w-32 uppercase bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-center font-mono text-lg tracking-widest" />
+                <button onclick="joinRoom(false)" class="flex-1 bg-emerald-600 hover:bg-emerald-500 font-bold rounded-lg text-sm">Join Table</button>
+              </div>
+            </div>
+          </div>
+        \`;
+        return;
+      }
+
+      const me = state.players.find(p => p.outputHand !== undefined);
+
+      let html = \`
+        <div class="flex flex-wrap items-center justify-between bg-slate-900 border border-slate-800 rounded-xl p-4 mb-6 gap-4">
+          <div>
+            <span class="text-xs uppercase tracking-widest text-slate-400">Room Code</span>
+            <div class="text-2xl font-mono font-black text-amber-400">\${state.code}</div>
+          </div>
+          <div class="flex items-center gap-6">
+            <div>
+              <span class="text-xs text-slate-400 block">Fiscal Quarter</span>
+              <span class="text-lg font-bold">\${state.quarter} / \${state.maxQuarters}</span>
+            </div>
+            <div>
+              <span class="text-xs text-slate-400 block">Summit Quota Pact</span>
+              <select onchange="updateQuota(this.value)" class="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-amber-300 font-bold text-sm">
+                \${[1,2,3,4,5].map(q => \`<option value="\${q}" \${state.quota === q ? 'selected' : ''}>\${q} Barrels / Firm</option>\`).join('')}
+              </select>
+            </div>
+            <a href="/admin" target="_blank" class="text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 px-3 py-1.5 rounded-lg border border-slate-700">
+              Admin ↗
+            </a>
+          </div>
+        </div>
+      \`;
+
+      html += \`
+        <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-6">
+          \${state.players.map(p => \`
+            <div class="bg-slate-900 border \${p.locked ? 'border-emerald-500/60' : 'border-slate-800'} rounded-xl p-3">
+              <div class="flex justify-between items-center mb-1">
+                <span class="font-bold text-sm truncate">\${p.name}</span>
+                <span class="text-[10px] px-2 py-0.5 rounded-full \${p.locked ? 'bg-emerald-500/20 text-emerald-300' : 'bg-slate-800 text-slate-400'}">
+                  \${p.eliminated ? 'LIQUIDATED' : (p.locked ? 'LOCKED' : 'THINKING')}
+                </span>
+              </div>
+              <div class="text-xl font-black text-amber-400">\${p.tokens} <span class="text-xs font-normal text-slate-400">tokens</span></div>
+              <div class="text-xs text-slate-400 mt-1">SPR Silo: <b>\${p.storedBarrels}B</b> | Sold: <b>\${p.totalBarrelsSold}B</b></div>
+            </div>
+          \`).join('')}
+        </div>
+      \`;
+
+      if (state.phase === 'LOBBY') {
+        html += \`
+          <div class="bg-slate-900 border border-slate-800 rounded-xl p-6 text-center">
+            <h2 class="text-lg font-bold mb-2">Waiting for Conglomerates (\${state.players.length}/6)</h2>
+            <p class="text-sm text-slate-400 mb-6">Share Room Code <b class="text-amber-400 font-mono">\${state.code}</b> with players or add AI Bots below.</p>
+            <div class="flex flex-wrap justify-center gap-2 mb-6">
+              <button onclick="addBot('COOPERATOR')" class="bg-slate-800 hover:bg-slate-700 px-3 py-2 rounded-lg text-xs">+ Add Quota Cooperator Bot</button>
+              <button onclick="addBot('BALANCED')" class="bg-slate-800 hover:bg-slate-700 px-3 py-2 rounded-lg text-xs">+ Add Nash Optimizer Bot</button>
+              <button onclick="addBot('DEFECTOR')" class="bg-slate-800 hover:bg-slate-700 px-3 py-2 rounded-lg text-xs">+ Add Greedy Defector Bot</button>
+            </div>
+            <button onclick="startGame()" class="bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold px-8 py-3 rounded-xl">Launch Quarter 1</button>
+          </div>
+        \`;
+      }
+
+      if (state.phase === 'PLAYING') {
+        if (state.reconDemand) {
+          html += \`
+            <div class="bg-indigo-950/70 border border-indigo-500 rounded-xl p-4 mb-6">
+              <div class="text-xs uppercase tracking-wider text-indigo-300 font-bold">🛰️ Classified Satellite Recon Intercept</div>
+              <div class="text-lg font-bold text-white">\${state.reconDemand.name}: P = max(\${state.reconDemand.Pmin}, \${state.reconDemand.A} - \${state.reconDemand.k} × Q)</div>
+              <div class="text-xs text-indigo-200">\${state.reconDemand.desc}</div>
+            </div>
+          \`;
+        }
+
+        if (me && !me.eliminated && !me.locked) {
+          const rivals = state.players.filter(p => p.id !== me.id && !p.eliminated);
+          html += \`
+            <div class="bg-slate-900 border border-slate-800 rounded-xl p-5">
+              <h3 class="font-bold text-amber-400 mb-3">1. Select Output Capacity Card</h3>
+              <div class="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-6">
+                \${me.outputHand.map((barrels, idx) => \`
+                  <div onclick="selectedCardIdx=\${idx}; render();" class="cursor-pointer border-2 rounded-xl p-4 text-center transition \${selectedCardIdx === idx ? 'border-amber-400 bg-amber-500/10' : 'border-slate-800 bg-slate-950'}">
+                    <div class="text-2xl font-black">\${barrels}B</div>
+                    <div class="text-xs text-slate-400 mt-1">Cost: <b class="text-rose-400">\${COSTS[barrels]} tokens</b></div>
+                  </div>
+                \`).join('')}
+              </div>
+
+              \${me.storedBarrels > 0 ? \`
+                <div class="mb-6 bg-slate-950 border border-slate-800 p-3 rounded-lg flex items-center justify-between">
+                  <span class="text-sm">Release Stored SPR Barrels (0 Cost): <b>\${releaseStoredCount}B / \${me.storedBarrels}B</b></span>
+                  <input type="range" min="0" max="\${me.storedBarrels}" value="\${releaseStoredCount}" onchange="releaseStoredCount=Number(this.value); render();" />
+                </div>
+              \` : ''}
+
+              <h3 class="font-bold text-amber-400 mb-3">2. Sub-Rosa Tech Card (Optional)</h3>
+              <div class="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
+                \${me.techHand.map(t => \`
+                  <div class="border rounded-xl p-3 \${selectedTechUid === t.uid ? 'border-emerald-400 bg-emerald-500/10' : 'border-slate-800 bg-slate-950'}">
+                    <div class="font-bold text-sm text-emerald-300">\${t.name}</div>
+                    <p class="text-xs text-slate-400 my-2">\${t.desc}</p>
+                    \${t.id === 'RECON' ? \`
+                      <button onclick="triggerRecon('\${t.uid}')" class="w-full bg-indigo-600 hover:bg-indigo-500 text-xs font-bold py-1.5 rounded">Activate Recon Now</button>
+                    \` : \`
+                      <button onclick="selectedTechUid = (selectedTechUid === '\${t.uid}' ? '' : '\${t.uid}'); render();" class="w-full bg-slate-800 hover:bg-slate-700 text-xs font-bold py-1.5 rounded">
+                        \${selectedTechUid === t.uid ? 'Equipped' : 'Equip Card'}
+                      </button>
+                    \`}
+                  </div>
+                \`).join('')}
+              </div>
+
+              \${selectedTechUid ? \`
+                <div class="mb-6">
+                  <label class="text-xs text-slate-400 block mb-1">Target Rival (Required for Whistleblower / Embargo):</label>
+                  <select onchange="selectedTargetId=this.value" class="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm w-full md:w-64">
+                    <option value="">-- Select Target Firm --</option>
+                    \${rivals.map(r => \`<option value="\${r.id}" \${selectedTargetId === r.id ? 'selected' : ''}>\${r.name}</option>\`).join('')}
+                  </select>
+                </div>
+              \` : ''}
+
+              <button onclick="submitMove()" class="w-full bg-amber-500 hover:bg-amber-400 text-slate-950 font-black py-3 rounded-xl">Lock In Quarterly Production</button>
+            </div>
+          \`;
+        } else {
+          html += \`
+            <div class="bg-slate-900 border border-slate-800 rounded-xl p-8 text-center">
+              <div class="text-lg font-bold text-emerald-400 mb-1">Awaiting Remaining Syndicate Commits...</div>
+              <p class="text-xs text-slate-400">Market clearing equation and Sub-Rosa operations will execute simultaneously once all firms lock in.</p>
+            </div>
+          \`;
+        }
+      }
+
+      if (state.phase === 'RESULTS' && state.lastRoundSummary) {
+        const s = state.lastRoundSummary;
+        html += \`
+          <div class="bg-slate-900 border border-slate-800 rounded-xl p-6 mb-6">
+            <div class="flex flex-wrap justify-between items-center border-b border-slate-800 pb-4 mb-4 gap-4">
+              <div>
+                <span class="text-xs uppercase text-amber-400 font-bold">Macro Demand Shock Revealed</span>
+                <h2 class="text-2xl font-black">\${s.demand.name}</h2>
+                <p class="text-xs text-slate-400">\${s.demand.desc} | Formula: P = max(\${s.demand.Pmin}, \${s.demand.A} - \${s.demand.k} × Q)</p>
+              </div>
+              <div class="flex gap-6 text-right">
+                <div>
+                  <span class="text-xs text-slate-400 block">Total Output (Q)</span>
+                  <span class="text-2xl font-black text-white">\${s.Q_total}B</span>
+                </div>
+                <div>
+                  <span class="text-xs text-slate-400 block">Clearing Price (P)</span>
+                  <span class="text-2xl font-black text-emerald-400">\${s.P} tokens/B</span>
+                </div>
+              </div>
+            </div>
+
+            \${s.logs.length > 0 ? \`
+              <div class="bg-slate-950 border border-slate-800 rounded-lg p-3 mb-4 space-y-1">
+                \${s.logs.map(l => \`<div class="text-xs text-amber-200">\${l}</div>\`).join('')}
+              </div>
+            \` : ''}
+
+            <div class="overflow-x-auto">
+              <table class="w-full text-left text-sm">
+                <thead>
+                  <tr class="border-b border-slate-800 text-xs text-slate-400">
+                    <th class="py-2">Firm</th>
+                    <th>Played</th>
+                    <th>Effective Sold</th>
+                    <th>Revenue</th>
+                    <th>Op Cost</th>
+                    <th>Fines/Bounty</th>
+                    <th>Net Profit</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  \${s.results.map(r => \`
+                    <tr class="border-b border-slate-800/50">
+                      <td class="py-2 font-bold">\${r.name} \${r.techCard ? \`<span class="text-xs bg-indigo-500/20 text-indigo-300 px-1.5 py-0.5 rounded ml-1">\${r.techCard.name}</span>\` : ''}</td>
+                      <td>\${r.baseBarrels}B \${r.releasedBarrels ? \`+\${r.releasedBarrels}B(SPR)\` : ''}</td>
+                      <td>\${r.effectiveBarrels}B \${r.seizedBarrels ? \`<span class="text-rose-400 text-xs">(-\${r.seizedBarrels}B seized)</span>\` : ''}</td>
+                      <td>+\${r.revenue}</td>
+                      <td class="text-rose-400">-\${r.baseCost}</td>
+                      <td>\${r.bounties - r.fines >= 0 ? \`+\${r.bounties - r.fines}\` : (r.bounties - r.fines)}</td>
+                      <td class="font-black \${r.netProfit >= 0 ? 'text-emerald-400' : 'text-rose-400'}">\${r.netProfit >= 0 ? \`+\${r.netProfit}\` : r.netProfit}</td>
+                    </tr>
+                  \`).join('')}
+                </tbody>
+              </table>
+            </div>
+
+            <button onclick="nextQuarter()" class="mt-6 w-full bg-amber-500 hover:bg-amber-400 text-slate-950 font-black py-3 rounded-xl">
+              \${state.quarter >= state.maxQuarters ? 'Finalize Fiscal Audit & Crown Winner' : \`Advance to Quarter \${state.quarter + 1}\`}
+            </button>
+          </div>
+        \`;
+      }
+
+      if (state.phase === 'GAME_OVER') {
+        const sorted = [...state.players].sort((a, b) => (b.tokens - a.tokens) || (a.totalBarrelsSold - b.totalBarrelsSold));
+        html += \`
+          <div class="bg-slate-900 border border-amber-500/50 rounded-xl p-6 text-center">
+            <h2 class="text-3xl font-black text-amber-400 mb-2">CHAMPION SYNDICATE: \${sorted[0].name}</h2>
+            <p class="text-sm text-slate-400 mb-6">Tie-breaker: Lowest cumulative barrels dumped onto the market.</p>
+            <div class="max-w-md mx-auto space-y-2 mb-6">
+              \${sorted.map((p, idx) => \`
+                <div class="flex justify-between bg-slate-950 p-3 rounded-lg border border-slate-800">
+                  <span class="font-bold">#\${idx + 1} \${p.name}</span>
+                  <span class="text-amber-400 font-bold">\${p.tokens} tokens <span class="text-xs text-slate-500">(\${p.totalBarrelsSold}B sold)</span></span>
+                </div>
+              \`).join('')}
+            </div>
+            <button onclick="startGame()" class="bg-amber-500 text-slate-950 font-bold px-6 py-2.5 rounded-lg">Start New 5-Quarter Match</button>
+          </div>
+        \`;
+      }
+
+      root.innerHTML = html;
+    }
+
+    render();
+  </script>
+</body>
+</html>`;
+
+// Guaranteed Root Route for Main Game Page
+app.get('/', (req, res) => {
+  res.setHeader('Content-Type', 'text/html');
+  res.send(MAIN_GAME_HTML);
 });
+
+// Direct Route for Admin Dashboard
+app.get('/admin', (req, res) => {
+  const adminPath = path.join(__dirname, 'public', 'admin.html');
+  if (fs.existsSync(adminPath)) {
+    res.sendFile(adminPath);
+  } else {
+    res.status(404).send('admin.html not found inside public/ folder.');
+  }
+});
+
+app.use(express.static(path.join(__dirname, 'public')));
 
 const OUTPUT_COSTS = { 1: 0, 2: 2, 3: 5, 4: 9, 5: 14 };
 
@@ -248,7 +589,6 @@ function resolveQuarter(room) {
   const results = {};
 
   activePlayers.forEach(p => {
-    // Auto-pick card index 0 if force-resolved by Admin before player locked in
     const sub = p.submission || { cardIndex: 0, releaseStored: 0, techUid: null, targetId: null };
     const safeIdx = Math.min(sub.cardIndex, p.outputHand.length - 1);
     const baseBarrels = p.outputHand[safeIdx] || 1;
@@ -401,7 +741,6 @@ function advanceRoomQuarter(room) {
 }
 
 io.on('connection', socket => {
-  // --- ADMIN EVENTS ---
   socket.on('adminAuth', ({ key }) => {
     if (key === ADMIN_KEY) {
       adminSockets.add(socket.id);
@@ -441,7 +780,6 @@ io.on('connection', socket => {
     }
   });
 
-  // --- PLAYER EVENTS ---
   socket.on('createRoom', ({ playerName, isProjector }) => {
     const code = Math.random().toString(36).substring(2, 6).toUpperCase();
     const room = {
@@ -608,8 +946,22 @@ io.on('connection', socket => {
   });
 });
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`Cournot Cartel server running on http://localhost:${PORT}`);
-  console.log(`Admin Dashboard available at http://localhost:${PORT}/admin (Key: ${ADMIN_KEY})`);
+// Auto-fallback port listener if port 3000 is occupied by an old background process
+let currentPort = Number(process.env.PORT) || 3000;
+
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.log(`⚠️ Port ${currentPort} is busy. Switching to port ${currentPort + 1}...`);
+    currentPort += 1;
+    server.listen(currentPort);
+  } else {
+    console.error(err);
+  }
 });
+
+server.on('listening', () => {
+  console.log(`\n✅ MAIN GAME LIVE AT:   http://localhost:${currentPort}`);
+  console.log(`✅ ADMIN PORTAL LIVE AT: http://localhost:${currentPort}/admin (Key: ${ADMIN_KEY})\n`);
+});
+
+server.listen(currentPort);

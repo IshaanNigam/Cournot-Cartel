@@ -303,4 +303,25 @@
         const sorted = [...state.players].sort((a, b) => (b.tokens - a.tokens) || (a.totalBarrelsSold - b.totalBarrelsSold));
         html += `
           <div class="bg-slate-900 border border-amber-500/50 rounded-xl p-6 text-center">
-            <h2 class="text-3xl font-black
+            <h2 class="text-3xl font-black text-amber-400 mb-2">CHAMPION SYNDICATE: ${sorted[0].name}</h2>
+            <p class="text-sm text-slate-400 mb-6">Tie-breaker: Lowest cumulative barrels dumped onto the market.</p>
+            <div class="max-w-md mx-auto space-y-2 mb-6">
+              ${sorted.map((p, idx) => `
+                <div class="flex justify-between bg-slate-950 p-3 rounded-lg border border-slate-800">
+                  <span class="font-bold">#${idx + 1} ${p.name}</span>
+                  <span class="text-amber-400 font-bold">${p.tokens} tokens <span class="text-xs text-slate-500">(${p.totalBarrelsSold}B sold)</span></span>
+                </div>
+              `).join('')}
+            </div>
+            <button onclick="startGame()" class="bg-amber-500 text-slate-950 font-bold px-6 py-2.5 rounded-lg">Start New 5-Quarter Match</button>
+          </div>
+        `;
+      }
+
+      root.innerHTML = html;
+    }
+
+    render();
+  </script>
+</body>
+</html>
